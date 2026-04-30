@@ -1,3 +1,9 @@
+# Local
+.DS_Store
+.vscode/
+.worktrees/
+docs/
+
 # Logs
 logs
 *.log
@@ -5,6 +11,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
+.pnpm-debug.log*
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
@@ -55,6 +62,12 @@ web_modules/
 
 # Optional stylelint cache
 .stylelintcache
+
+# Microbundle cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
 
 # Optional REPL history
 .node_repl_history
@@ -141,3 +154,8 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# wrangler project
+.dev.vars*
+!.dev.vars.example
+.wrangler/

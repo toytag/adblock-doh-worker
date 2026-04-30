@@ -1,0 +1,28 @@
+{
+  "name": "adblock-doh-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bloom:build": "node scripts/build-bloom.js --output .cache/blocklist-bloom.json",
+    "bloom:publish:local": "wrangler kv key put blocklist:bloom --path .cache/blocklist-bloom.json --binding KV --local --persist-to .wrangler/state",
+    "bloom:publish:remote": "wrangler kv key put blocklist:bloom --path .cache/blocklist-bloom.json --binding KV --remote",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "format:check": "prettier . --check",
+    "format": "prettier . --write",
+    "start": "wrangler dev",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "bloom-filters": "^3.0.4",
+    "dns-packet": "^5.6.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.15.1",
+    "@types/node": "^22.19.17",
+    "prettier": "^3.8.3",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.86.0"
+  }
+}

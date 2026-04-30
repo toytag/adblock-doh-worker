@@ -1,0 +1,46 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  // Worker identity and entrypoint. These are the minimum deploy-time fields.
+  "name": "adblock-doh-worker",
+  "main": "src/index.js",
+
+  // Runtime compatibility. Keep this date intentional when adopting Workers
+  // runtime changes; `nodejs_compat` is needed by bundled Node-style packages.
+  "compatibility_date": "2026-04-29",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Deployment diagnostics.
+  "upload_source_maps": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1,
+  },
+
+  // Run near upstream services when Cloudflare observes a latency benefit.
+  "placement": { "mode": "smart" },
+
+  // Non-secret runtime configuration. Use Wrangler secrets for sensitive values.
+  // Both values are unused at runtime — documented here for discoverability;
+  // real defaults live in src/dns.js and scripts/build-bloom.js.
+  "vars": {
+    "BLOCKLIST_URL": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro-onlydomains.txt,https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/tif-onlydomains.txt",
+    "UPSTREAM_DOH_URL": "https://cloudflare-dns.com/dns-query",
+  },
+
+  // Persist the externally built Bloom filter between Worker isolates.
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "458e91a991e548b3adfefd34d875754c",
+    },
+  ],
+
+  // Per-query metrics written from the DNS request path.
+  "analytics_engine_datasets": [
+    {
+      "binding": "ANALYTICS",
+      "dataset": "adblock_doh_analytics",
+    },
+  ],
+}
