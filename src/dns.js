@@ -6,6 +6,7 @@ const BLOCK_TTL_SECONDS = 300;
 
 const RCODE_NOERROR = 0;
 const RCODE_SERVFAIL = 2;
+const RCODE_NXDOMAIN = 3;
 
 export async function readDnsRequest(request, url) {
   if (request.method === 'GET') {
@@ -33,7 +34,34 @@ function decodeBase64Url(value) {
   }
 }
 
-function encode(query, question, rcode, answers) {
+function syntheticSoa(name, ttl) {
+  return {
+    name,
+    type: 'SOA',
+    ttl,
+    data: {
+      // mname/rname are synthetic — we are not a real authoritative server,
+      // but the record must parse. Clients only read `minimum` for neg-cache.
+      mname: name,
+      rname: `hostmaster.${name}`,
+      serial: 1,
+      refresh: ttl,
+      retry: ttl,
+      expire: ttl,
+      minimum: ttl,
+    },
+  };
+}
+
+function echoOpt(query) {
+  const opt = query.additionals?.find((r) => r.type === 'OPT');
+  if (!opt) return [];
+  // Clear DO bit: synth answers are unsigned, so a validating client must not
+  // be told this response carries DNSSEC data.
+  return [{ ...opt, flags: (opt.flags ?? 0) & ~dnsPacket.DNSSEC_OK, options: opt.options ?? [] }];
+}
+
+function encode(query, question, rcode, answers, authorities = []) {
   const flags =
     // Mirror a real recursive resolver: keep client RD, set RA, layer in rcode;
     // otherwise clients reject the synthetic response.
@@ -45,15 +73,8 @@ function encode(query, question, rcode, answers) {
     questions: [question],
     answers,
     additionals: echoOpt(query),
+    authorities,
   });
-}
-
-function echoOpt(query) {
-  const opt = query.additionals?.find((r) => r.type === 'OPT');
-  if (!opt) return [];
-  // Clear DO bit: synth answers are unsigned, so a validating client must not
-  // be told this response carries DNSSEC data.
-  return [{ ...opt, flags: (opt.flags ?? 0) & ~dnsPacket.DNSSEC_OK, options: opt.options ?? [] }];
 }
 
 export function blockedResponse(query, question, ttl = BLOCK_TTL_SECONDS) {
@@ -62,7 +83,13 @@ export function blockedResponse(query, question, ttl = BLOCK_TTL_SECONDS) {
   // client sees "no such record" rather than a fake IP.
   if (question.type === 'A') answers.push({ ...question, ttl, data: '0.0.0.0' });
   else if (question.type === 'AAAA') answers.push({ ...question, ttl, data: '::' });
-  return encode(query, question, RCODE_NOERROR, answers);
+  // RFC 2308: empty NOERROR (NODATA) needs an SOA in the authority section so
+  // the client knows how long to negative-cache. Without it, RFC-strict clients
+  // re-query on every lookup — common for HTTPS/SVCB (type 65), which Apple and
+  // Chrome fire alongside every A/AAAA. A/AAAA blocks already carry a TTL on
+  // the synth answer, so they don't need this.
+  const authorities = answers.length === 0 ? [syntheticSoa(question.name, ttl)] : [];
+  return encode(query, question, RCODE_NOERROR, answers, authorities);
 }
 
 export function servfailResponse(query, question) {

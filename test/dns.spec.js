@@ -82,6 +82,36 @@ describe('blockedResponse', () => {
     expect(decoded.flags & 0xf).toBe(0);
   });
 
+  it('non-A/AAAA NODATA carries SOA in authority for negative caching (RFC 2308)', () => {
+    const q = { ...baseQuestion, type: 'TXT' };
+    const decoded = decode(blockedResponse({ ...baseQuery, questions: [q] }, q, 60));
+    const soa = decoded.authorities.find((r) => r.type === 'SOA');
+    expect(soa).toBeDefined();
+    expect(soa.name).toBe('x.com');
+    expect(soa.ttl).toBe(60);
+    expect(soa.data.minimum).toBe(60);
+    expect(soa.data.mname).toBe('x.com');
+    expect(soa.data.rname).toBe('hostmaster.x.com');
+  });
+
+  it('HTTPS (UNKNOWN_65) is treated as non-A/AAAA: NODATA with SOA', () => {
+    const q = { ...baseQuestion, type: 'UNKNOWN_65' };
+    const decoded = decode(blockedResponse({ ...baseQuery, questions: [q] }, q, 60));
+    expect(decoded.answers).toEqual([]);
+    expect(decoded.authorities.find((r) => r.type === 'SOA')).toBeDefined();
+  });
+
+  it('A block omits authority SOA (synth answer carries TTL already)', () => {
+    const decoded = decode(blockedResponse(baseQuery, baseQuestion, 60));
+    expect(decoded.authorities.find((r) => r.type === 'SOA')).toBeUndefined();
+  });
+
+  it('AAAA block omits authority SOA', () => {
+    const q = { ...baseQuestion, type: 'AAAA' };
+    const decoded = decode(blockedResponse({ ...baseQuery, questions: [q] }, q, 60));
+    expect(decoded.authorities.find((r) => r.type === 'SOA')).toBeUndefined();
+  });
+
   it('preserves query id and RD flag, sets RA bit', () => {
     const decoded = decode(blockedResponse(baseQuery, baseQuestion, 60));
     expect(decoded.id).toBe(42);
