@@ -9,8 +9,8 @@
     "bloom:publish:remote": "wrangler kv key put blocklist:bloom --path .cache/blocklist-bloom.json --binding KV --remote",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
-    "format:check": "prettier . --check",
-    "format": "prettier . --write",
+    "format:check": "prettier --config package.json --check \"(scripts|src|test)/**/*.(t|j)s\"",
+    "format": "prettier --config package.json --write \"(scripts|src|test)/**/*.(t|j)s\"",
     "start": "wrangler dev",
     "test": "vitest run"
   },
@@ -24,5 +24,12 @@
     "prettier": "^3.8.3",
     "vitest": "^4.1.0",
     "wrangler": "^4.86.0"
+  },
+  "prettier": {
+    "printWidth": 120,
+    "singleQuote": true,
+    "semi": true,
+    "useTabs": false,
+    "tabWidth": 2
   }
 }

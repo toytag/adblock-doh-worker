@@ -19,7 +19,11 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
-          include: ['test/dns.spec.js', 'test/blocklist.spec.js', 'test/build-bloom.spec.js'],
+          include: [
+            'test/blocklist.spec.js',
+            'test/build-bloom.spec.js',
+            'test/dns.spec.js',
+          ],
         },
       },
     ],
