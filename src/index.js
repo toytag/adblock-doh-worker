@@ -6,8 +6,14 @@ import { blockedResponse, dnsRequest, dnsResponse, readDnsRequest, servfailRespo
 
 export default {
   async fetch(request, env) {
+    // Analytics - latency_ms
     const startedAt = Date.now();
+    // Analytics - server location
+    const colo = request.cf?.colo ?? 'unknown';
 
+    // RFC 8484: DoH lives at a single resource (`/dns-query`) and accepts
+    // only GET (base64url query in `?dns=`) or POST (raw wire in body).
+    // Everything else is HTTP-layer noise — reject before touching DNS.
     const url = new URL(request.url);
     if (url.pathname !== '/dns-query') {
       return Response.json({ error: 'not found' }, { status: 404 });
@@ -19,9 +25,14 @@ export default {
       });
     }
 
+    // Wire bytes + decoded query are kept side-by-side: the wire is what we
+    // forward to upstream/sink (preserves client's exact OPT/EDNS), the
+    // decoded form is what we need for SERVFAIL synth (id, RD flag, OPT echo).
     const wire = await readDnsRequest(request, url);
     if (!wire.ok) return new Response(wire.message, { status: wire.status });
 
+    // Decode failure here = client sent garbage. HTTP 400 (not SERVFAIL): we
+    // have no query id/flags to build a valid DNS response from.
     let query, question;
     try {
       query = dnsPacket.decode(Buffer.from(wire.body));
@@ -31,7 +42,7 @@ export default {
       return new Response('malformed dns packet', { status: 400 });
     }
 
-    const colo = request.cf?.colo ?? 'unknown';
+    // Analytics - helper function
     const emit = (outcome) => emitAnalytics(env, outcome, question.type, colo, startedAt);
 
     // Overlap KV Bloom load with upstream DoH fetch. Both promises are awaited
