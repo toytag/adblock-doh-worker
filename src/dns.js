@@ -1,17 +1,22 @@
 import { Buffer } from 'node:buffer';
 import * as dnsPacket from 'dns-packet';
 
-// Pool of recursive DoH endpoints; one is picked at random per request via
-// pickRandom so no single upstream sees the full query stream from one client.
+// Pool of recursive DoH endpoints; one is picked at random per request so no
+// single upstream sees the full query stream from one client.
 export const UPSTREAM_DOH_URLS = [
   'https://cloudflare-dns.com/dns-query',
   'https://dns.google/dns-query',
   'https://dns.quad9.net/dns-query',
 ];
-const BLOCK_TTL_SECONDS = 60;
+
+// Short so blocklist edits propagate to clients within a minute without
+// hammering us — synthesized answers have no real TTL to honor.
+export const BLOCK_TTL_SECONDS = 60;
 
 const RCODE_NOERROR = 0;
 const RCODE_SERVFAIL = 2;
+
+// --- Inbound: parse client DoH request ---------------------------------------
 
 export async function readDnsRequest(request, url) {
   if (request.method === 'GET') {
@@ -29,6 +34,9 @@ export async function readDnsRequest(request, url) {
   return { ok: true, body: new Uint8Array(await request.arrayBuffer()) };
 }
 
+// `Buffer.from(_, 'base64url')` silently drops invalid chars instead of
+// throwing, so pre-validate to reject malformed input as 400 rather than
+// forwarding garbage upstream.
 function decodeBase64Url(value) {
   if (!/^[A-Za-z0-9_-]+=*$/.test(value)) return null;
   try {
@@ -38,6 +46,21 @@ function decodeBase64Url(value) {
     return null;
   }
 }
+
+// --- Outbound: forward to upstream resolver ----------------------------------
+
+// `upstream` accepts a single URL or a pool; pool inputs get one pick per call
+// so load-balancing happens at request time, not at module load.
+export function dnsRequest(body, upstream = UPSTREAM_DOH_URLS) {
+  const url = Array.isArray(upstream) ? upstream[Math.floor(Math.random() * upstream.length)] : upstream;
+  return new Request(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/dns-message' },
+    body,
+  });
+}
+
+// --- Synthesis: build DNS response wire bytes --------------------------------
 
 function negativeCachingSoa(name, ttl) {
   return {
@@ -91,21 +114,11 @@ export function servfailResponse(query, question) {
   return encode(query, question, RCODE_SERVFAIL, []);
 }
 
+// --- Outbound: wrap wire bytes for the client --------------------------------
+
 export function dnsResponse(body, status = 200) {
   return new Response(body, {
     status,
     headers: { 'Content-Type': 'application/dns-message' },
-  });
-}
-
-export function pickRandom(items) {
-  return items[Math.floor(Math.random() * items.length)];
-}
-
-export function dnsRequest(body, url = pickRandom(UPSTREAM_DOH_URLS)) {
-  return new Request(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/dns-message' },
-    body,
   });
 }

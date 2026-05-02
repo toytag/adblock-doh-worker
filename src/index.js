@@ -3,7 +3,6 @@ import * as dnsPacket from 'dns-packet';
 
 import { hasBlockedDomains, loadBloomFilter } from './blocklist.js';
 import { blockedResponse, dnsRequest, dnsResponse, readDnsRequest, servfailResponse } from './dns.js';
-import { error } from 'node:console';
 
 export default {
   async fetch(request, env) {

@@ -3,10 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as dnsPacket from 'dns-packet';
 
 import {
+  BLOCK_TTL_SECONDS,
   dnsResponse,
   blockedResponse,
   dnsRequest,
-  pickRandom,
   readDnsRequest,
   servfailResponse,
   UPSTREAM_DOH_URLS,
@@ -113,6 +113,11 @@ describe('blockedResponse', () => {
     const decoded = decode(blockedResponse(baseQuery, baseQuestion, 60));
     expect(decoded.answers[0].data).toBe('0.0.0.0');
     expect(decoded.answers[0].ttl).toBe(60);
+  });
+
+  it('defaults ttl to BLOCK_TTL_SECONDS when omitted', () => {
+    const decoded = decode(blockedResponse(baseQuery, baseQuestion));
+    expect(decoded.answers[0].ttl).toBe(BLOCK_TTL_SECONDS);
   });
 
   it('AAAA returns ::', () => {
@@ -223,23 +228,6 @@ describe('servfailResponse', () => {
   });
 });
 
-describe('pickRandom', () => {
-  it('returns the only element of a one-item array', () => {
-    expect(pickRandom(['only'])).toBe('only');
-  });
-
-  it('eventually returns every element across many calls', () => {
-    const items = ['a', 'b', 'c'];
-    const seen = new Set();
-    for (let i = 0; i < 200 && seen.size < items.length; i++) {
-      const picked = pickRandom(items);
-      expect(items).toContain(picked);
-      seen.add(picked);
-    }
-    expect(seen.size).toBe(items.length);
-  });
-});
-
 describe('UPSTREAM_DOH_URLS pool', () => {
   it('is a non-empty array of https URLs', () => {
     expect(Array.isArray(UPSTREAM_DOH_URLS)).toBe(true);
@@ -279,6 +267,17 @@ describe('dnsRequest', () => {
     const req = dnsRequest(new Uint8Array([0]));
     expect(UPSTREAM_DOH_URLS).toContain(req.url);
   });
+
+  it('picks one resolver when given an explicit pool', () => {
+    const pool = ['https://a.test/dns-query', 'https://b.test/dns-query'];
+    const seen = new Set();
+    for (let i = 0; i < 200 && seen.size < pool.length; i++) {
+      const req = dnsRequest(new Uint8Array([0]), pool);
+      expect(pool).toContain(req.url);
+      seen.add(req.url);
+    }
+    expect(seen.size).toBe(pool.length);
+  });
 });
 
 function encodeQuery(name, type = 'A') {
@@ -291,7 +290,7 @@ function encodeQuery(name, type = 'A') {
 }
 
 function toBase64Url(bytes) {
-  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return Buffer.from(bytes).toString('base64url');
 }
 
 function decode(bytes) {
