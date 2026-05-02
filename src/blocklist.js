@@ -68,6 +68,19 @@ export function isBlockedDomain(domain, filter) {
   return false;
 }
 
+function* allStrings(value) {
+  if (typeof value === 'string') yield value;
+  else if (Array.isArray(value)) for (const item of value) yield* allStrings(item);
+  else if (value && typeof value === 'object') for (const item of Object.values(value)) yield* allStrings(item);
+}
+
+export function hasBlockedDomains(value, filter) {
+  for (const candidate of allStrings(value)) {
+    if (isBlockedDomain(candidate, filter)) return true;
+  }
+  return false;
+}
+
 // Test-only: reset the isolate-level filter cache between specs. Double-
 // underscore + `test` prefix to signal "do not call from request handlers".
 export function __test_resetFilterCache() {

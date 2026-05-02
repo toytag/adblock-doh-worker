@@ -1,8 +1,9 @@
 import { Buffer } from 'node:buffer';
 import * as dnsPacket from 'dns-packet';
 
-import { isBlockedDomain, loadBloomFilter } from './blocklist.js';
+import { hasBlockedDomains, loadBloomFilter } from './blocklist.js';
 import { blockedResponse, dnsRequest, dnsResponse, readDnsRequest, servfailResponse } from './dns.js';
+import { error } from 'node:console';
 
 export default {
   async fetch(request, env) {
@@ -31,27 +32,36 @@ export default {
       return new Response('malformed dns packet', { status: 400 });
     }
 
-    const filter = await loadBloomFilter(env.KV);
     const colo = request.cf?.colo ?? 'unknown';
+    const emit = (outcome) => emitAnalytics(env, outcome, question.type, colo, startedAt);
 
-    // Fail-open on missing/failed filter: a broken blocklist must not break DNS.
-    // Per-request warn (sampled by observability head_sampling_rate) so a
-    // persistently broken filter is visible in logs, not just at load time —
-    // load failures are not isolate-cached, but successful loads are, so a
-    // long outage on a warm isolate would otherwise emit only one error log.
-    if (!filter) console.warn('serving without bloom filter');
-    if (filter && isBlockedDomain(question.name, filter)) {
-      emitAnalytics(env, 'blocked', question.type, colo, startedAt);
-      return dnsResponse(blockedResponse(query, question));
-    }
-
+    // Overlap KV Bloom load with upstream DoH fetch. Both promises are awaited
+    // together so the latency win does not leave floating Workers I/O behind.
+    const filterP = loadBloomFilter(env.KV);
+    const upstreamP = fetch(dnsRequest(wire.body));
     try {
-      const res = await fetch(dnsRequest(wire.body));
+      const [res, filter] = await Promise.all([upstreamP, filterP]);
       if (!res.ok) throw new Error(`upstream ${res.status}`);
-      emitAnalytics(env, 'allowed', question.type, colo, startedAt);
-      return dnsResponse(res.body, res.status);
-    } catch {
-      emitAnalytics(env, 'servfail', question.type, colo, startedAt);
+
+      // Fail-open on missing/failed filter: a broken blocklist must not break DNS.
+      if (!filter) {
+        console.warn('serving without bloom filter');
+        emit('allowed');
+        return dnsResponse(res.body, res.status);
+      }
+
+      const upstreamBytes = new Uint8Array(await res.arrayBuffer());
+      const reply = dnsPacket.decode(Buffer.from(upstreamBytes));
+      if (hasBlockedDomains(reply, filter)) {
+        emit('blocked');
+        return dnsResponse(blockedResponse(query, question));
+      }
+
+      emit('allowed');
+      return dnsResponse(upstreamBytes, res.status);
+    } catch (err) {
+      console.error('servfail', { error: err?.message });
+      emit('servfail');
       // RFC 8484 §4.2.1: return SERVFAIL inside DNS, not HTTP 5xx, so DoH
       // clients apply their normal resolver fallback.
       return dnsResponse(servfailResponse(query, question));
