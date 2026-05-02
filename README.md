@@ -31,6 +31,39 @@ Review `wrangler.jsonc` before deploying:
 - `kv_namespaces`: KV namespace binding used for the Bloom filter
 - `analytics_engine_datasets`: analytics binding for query metrics
 
+## Sinkhole DoH Endpoints
+
+When the Bloom filter flags an upstream answer, the Worker re-issues the
+original wire query to a sinkhole DoH endpoint, which owns the per-qtype
+block synthesis (A/AAAA null route, HTTPS/SVCB NODATA, etc.).
+
+Sink endpoints are personal AdGuard DNS URLs (e.g. `https://d.adguard-dns.com/dns-query/<hash>`),
+each tied to an account-level quota — the AdGuard free tier allows roughly
+**300,000 DNS queries per month per account**, so a pool of three accounts
+covers ~900k/month. When a sink exhausts its quota, AdGuard stops blocking
+and the Worker's `'blocked'` outcome silently degrades to a passthrough;
+monitor the analytics dataset and rotate accounts as needed.
+
+The sink URLs are read from `env.SINK_DOH_URLS`, a JSON-encoded string
+array. They are not committed because they identify your AdGuard account
+and are rate-limited.
+
+Local dev — create `.dev.vars` (gitignored):
+
+```
+SINK_DOH_URLS=["https://d.adguard-dns.com/dns-query/AAA","https://d.adguard-dns.com/dns-query/BBB"]
+```
+
+Production — set as a Worker secret:
+
+```sh
+echo '["https://d.adguard-dns.com/dns-query/AAA","https://d.adguard-dns.com/dns-query/BBB"]' \
+  | npx wrangler secret put SINK_DOH_URLS
+```
+
+If `SINK_DOH_URLS` is missing or malformed, blocked queries fall back to a
+locally-synthesized NODATA reply (no upstream sink call).
+
 ## Local Development
 
 Build the Bloom filter:

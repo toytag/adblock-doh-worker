@@ -48,6 +48,26 @@ describe('build-bloom script', () => {
   it('requires --output', async () => {
     await expect(main([], {}, { log() {} })).rejects.toThrow(/--output is required/);
   });
+
+  it('throws when upstream returns non-2xx', async () => {
+    vi.stubGlobal('fetch', async () => new Response('', { status: 500 }));
+    const output = await tmpOutput();
+    await expect(main(['--url', 'https://x/list.txt', '--output', output], {}, { log() {} })).rejects.toThrow(
+      /blocklist fetch .* failed: 500/,
+    );
+  });
+
+  it('throws when upstream Content-Length exceeds the source size cap', async () => {
+    const TOO_BIG = 26 * 1024 * 1024;
+    vi.stubGlobal(
+      'fetch',
+      async () => new Response('x', { headers: { 'Content-Length': String(TOO_BIG) } }),
+    );
+    const output = await tmpOutput();
+    await expect(main(['--url', 'https://x/list.txt', '--output', output], {}, { log() {} })).rejects.toThrow(
+      /too large/,
+    );
+  });
 });
 
 function stubFetch(body) {

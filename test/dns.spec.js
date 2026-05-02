@@ -2,7 +2,14 @@ import { Buffer } from 'node:buffer';
 import { describe, expect, it } from 'vitest';
 import * as dnsPacket from 'dns-packet';
 
-import { blockedResponse, dnsResponse, readDnsRequest, servfailResponse } from '../src/dns.js';
+import {
+  dnsResponse,
+  pickRandom,
+  readDnsRequest,
+  scanAnswersForBlocked,
+  servfailResponse,
+  UPSTREAM_DOH_URLS,
+} from '../src/dns.js';
 
 const baseQuestion = { name: 'x.com', type: 'A', class: 'IN' };
 const baseQuery = {
@@ -60,77 +67,18 @@ describe('readDnsRequest', () => {
     expect(result.ok).toBe(true);
     expect([...new Uint8Array(result.body)]).toEqual([...wire]);
   });
-});
 
-describe('blockedResponse', () => {
-  it('A returns 0.0.0.0 with the requested TTL', () => {
-    const decoded = decode(blockedResponse(baseQuery, baseQuestion, 60));
-    expect(decoded.answers[0].data).toBe('0.0.0.0');
-    expect(decoded.answers[0].ttl).toBe(60);
-  });
-
-  it('AAAA returns ::', () => {
-    const q = { ...baseQuestion, type: 'AAAA' };
-    const decoded = decode(blockedResponse({ ...baseQuery, questions: [q] }, q, 60));
-    expect(decoded.answers[0].data).toBe('::');
-  });
-
-  it('TXT returns empty NOERROR', () => {
-    const q = { ...baseQuestion, type: 'TXT' };
-    const decoded = decode(blockedResponse({ ...baseQuery, questions: [q] }, q, 60));
-    expect(decoded.answers).toEqual([]);
-    expect(decoded.flags & 0xf).toBe(0);
-  });
-
-  it('non-A/AAAA NODATA carries SOA in authority for negative caching (RFC 2308)', () => {
-    const q = { ...baseQuestion, type: 'TXT' };
-    const decoded = decode(blockedResponse({ ...baseQuery, questions: [q] }, q, 60));
-    const soa = decoded.authorities.find((r) => r.type === 'SOA');
-    expect(soa).toBeDefined();
-    expect(soa.name).toBe('x.com');
-    expect(soa.ttl).toBe(60);
-    expect(soa.data.minimum).toBe(60);
-    expect(soa.data.mname).toBe('x.com');
-    expect(soa.data.rname).toBe('hostmaster.x.com');
-  });
-
-  it('HTTPS (UNKNOWN_65) is treated as non-A/AAAA: NODATA with SOA', () => {
-    const q = { ...baseQuestion, type: 'UNKNOWN_65' };
-    const decoded = decode(blockedResponse({ ...baseQuery, questions: [q] }, q, 60));
-    expect(decoded.answers).toEqual([]);
-    expect(decoded.authorities.find((r) => r.type === 'SOA')).toBeDefined();
-  });
-
-  it('A block omits authority SOA (synth answer carries TTL already)', () => {
-    const decoded = decode(blockedResponse(baseQuery, baseQuestion, 60));
-    expect(decoded.authorities.find((r) => r.type === 'SOA')).toBeUndefined();
-  });
-
-  it('AAAA block omits authority SOA', () => {
-    const q = { ...baseQuestion, type: 'AAAA' };
-    const decoded = decode(blockedResponse({ ...baseQuery, questions: [q] }, q, 60));
-    expect(decoded.authorities.find((r) => r.type === 'SOA')).toBeUndefined();
-  });
-
-  it('preserves query id and RD flag, sets RA bit', () => {
-    const decoded = decode(blockedResponse(baseQuery, baseQuestion, 60));
-    expect(decoded.id).toBe(42);
-    expect(decoded.flags & dnsPacket.RECURSION_DESIRED).toBeTruthy();
-    expect(decoded.flags & dnsPacket.RECURSION_AVAILABLE).toBeTruthy();
-  });
-
-  it('echoes client OPT with DO bit cleared', () => {
-    const query = { ...baseQuery, additionals: [opt({ flags: dnsPacket.DNSSEC_OK })] };
-    const decoded = decode(blockedResponse(query, baseQuestion, 60));
-    const echoed = decoded.additionals.find((r) => r.type === 'OPT');
-    expect(echoed).toBeDefined();
-    expect(echoed.udpPayloadSize).toBe(1232);
-    expect(echoed.flags & dnsPacket.DNSSEC_OK).toBe(0);
-  });
-
-  it('omits OPT when query has none', () => {
-    const decoded = decode(blockedResponse(baseQuery, baseQuestion, 60));
-    expect(decoded.additionals.find((r) => r.type === 'OPT')).toBeUndefined();
+  it('accepts POST content-type with parameters and mixed case', async () => {
+    const url = new URL('http://x/dns-query');
+    const wire = encodeQuery('blocked.test');
+    const req = new Request(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'Application/DNS-Message; charset=binary' },
+      body: wire,
+    });
+    const result = await readDnsRequest(req, url);
+    expect(result.ok).toBe(true);
+    expect([...new Uint8Array(result.body)]).toEqual([...wire]);
   });
 });
 
@@ -150,6 +98,115 @@ describe('servfailResponse', () => {
   });
 });
 
+describe('pickRandom', () => {
+  it('returns the only element of a one-item array', () => {
+    expect(pickRandom(['only'])).toBe('only');
+  });
+
+  it('eventually returns every element across many calls', () => {
+    const items = ['a', 'b', 'c'];
+    const seen = new Set();
+    for (let i = 0; i < 200 && seen.size < items.length; i++) {
+      const picked = pickRandom(items);
+      expect(items).toContain(picked);
+      seen.add(picked);
+    }
+    expect(seen.size).toBe(items.length);
+  });
+});
+
+describe('UPSTREAM_DOH_URLS pool', () => {
+  it('is a non-empty array of https URLs', () => {
+    expect(Array.isArray(UPSTREAM_DOH_URLS)).toBe(true);
+    expect(UPSTREAM_DOH_URLS.length).toBeGreaterThan(0);
+    for (const u of UPSTREAM_DOH_URLS) expect(u).toMatch(/^https:\/\//);
+  });
+});
+
+describe('scanAnswersForBlocked', () => {
+  const filter = stubFilter(['tracker.example']);
+
+  it('returns true when CNAME chain ends in a blocked target', () => {
+    const reply = {
+      answers: [{ name: 'clean.example', type: 'CNAME', class: 'IN', ttl: 60, data: 'tracker.example' }],
+    };
+    expect(scanAnswersForBlocked(reply, filter)).toBe(true);
+  });
+
+  it.each(['HTTPS', 'SVCB'])('returns true when a %s record target is blocked', (type) => {
+    const reply = {
+      answers: [
+        {
+          name: 'clean.example',
+          type,
+          class: 'IN',
+          ttl: 60,
+          data: { priority: 1, target: 'tracker.example', values: [] },
+        },
+      ],
+    };
+    expect(scanAnswersForBlocked(reply, filter)).toBe(true);
+  });
+
+  it('returns true when a PTR rdata is blocked', () => {
+    const reply = {
+      answers: [{ name: '1.0.0.127.in-addr.arpa', type: 'PTR', class: 'IN', ttl: 60, data: 'tracker.example' }],
+    };
+    expect(scanAnswersForBlocked(reply, filter)).toBe(true);
+  });
+
+  it('returns true when the record name itself is blocked (parent-label match)', () => {
+    const reply = {
+      answers: [{ name: 'sub.tracker.example', type: 'A', class: 'IN', ttl: 60, data: '1.2.3.4' }],
+    };
+    expect(scanAnswersForBlocked(reply, filter)).toBe(true);
+  });
+
+  it('returns false for an all-clean answers section', () => {
+    const reply = {
+      answers: [
+        { name: 'clean.example', type: 'A', class: 'IN', ttl: 60, data: '1.2.3.4' },
+        { name: 'clean.example', type: 'AAAA', class: 'IN', ttl: 60, data: '::1' },
+      ],
+    };
+    expect(scanAnswersForBlocked(reply, filter)).toBe(false);
+  });
+
+  it('returns false for an empty answers section', () => {
+    expect(scanAnswersForBlocked({ answers: [] }, filter)).toBe(false);
+  });
+
+  it('returns false when answers is missing entirely (does not throw)', () => {
+    expect(scanAnswersForBlocked({}, filter)).toBe(false);
+  });
+
+  it('does not throw on records with unexpected rdata shapes', () => {
+    const reply = {
+      answers: [{ name: 'clean.example', type: 'WEIRD', class: 'IN', ttl: 60, data: { foo: { bar: 42, baz: null } } }],
+    };
+    expect(() => scanAnswersForBlocked(reply, filter)).not.toThrow();
+    expect(scanAnswersForBlocked(reply, filter)).toBe(false);
+  });
+
+  it('ignores TXT junk that is not a valid domain', () => {
+    const reply = {
+      answers: [
+        { name: 'clean.example', type: 'TXT', class: 'IN', ttl: 60, data: ['v=spf1 include:_spf.example -all'] },
+      ],
+    };
+    expect(scanAnswersForBlocked(reply, filter)).toBe(false);
+  });
+
+  it('ignores authorities and additionals sections', () => {
+    const reply = {
+      answers: [{ name: 'clean.example', type: 'A', class: 'IN', ttl: 60, data: '1.2.3.4' }],
+      authorities: [{ name: 'tracker.example', type: 'NS', class: 'IN', ttl: 60, data: 'tracker.example' }],
+      additionals: [{ name: 'tracker.example', type: 'A', class: 'IN', ttl: 60, data: '5.6.7.8' }],
+    };
+    expect(scanAnswersForBlocked(reply, filter)).toBe(false);
+  });
+});
+
 describe('dnsResponse', () => {
   it('wraps body with DoH content-type and default 200', async () => {
     const body = new Uint8Array([1, 2, 3]);
@@ -157,6 +214,12 @@ describe('dnsResponse', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Type')).toBe('application/dns-message');
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(body);
+  });
+
+  it('honors explicit status override', () => {
+    const res = dnsResponse(new Uint8Array([0]), 502);
+    expect(res.status).toBe(502);
+    expect(res.headers.get('Content-Type')).toBe('application/dns-message');
   });
 });
 
@@ -175,6 +238,11 @@ function toBase64Url(bytes) {
 
 function decode(bytes) {
   return dnsPacket.decode(Buffer.from(bytes));
+}
+
+function stubFilter(domains) {
+  const set = new Set(domains);
+  return { has: (d) => set.has(d) };
 }
 
 function opt({ flags = 0, udpPayloadSize = 1232 } = {}) {

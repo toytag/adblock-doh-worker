@@ -20,14 +20,6 @@
   // Run near upstream services when Cloudflare observes a latency benefit.
   "placement": { "mode": "smart" },
 
-  // Non-secret runtime configuration. Use Wrangler secrets for sensitive values.
-  // Both values are unused at runtime — documented here for discoverability;
-  // real defaults live in src/dns.js and scripts/build-bloom.js.
-  "vars": {
-    "BLOCKLIST_URL": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro-onlydomains.txt,https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/tif-onlydomains.txt",
-    "UPSTREAM_DOH_URL": "https://cloudflare-dns.com/dns-query",
-  },
-
   // Persist the externally built Bloom filter between Worker isolates.
   "kv_namespaces": [
     {

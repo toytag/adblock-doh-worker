@@ -1,12 +1,24 @@
 import { Buffer } from 'node:buffer';
 import * as dnsPacket from 'dns-packet';
 
-export const UPSTREAM_DOH_URL = 'https://cloudflare-dns.com/dns-query';
-const BLOCK_TTL_SECONDS = 300;
+import { isBlockedDomain, normalizeDomain } from './blocklist.js';
 
-const RCODE_NOERROR = 0;
+// Pool of recursive DoH endpoints; one is picked at random per request via
+// pickRandom. Spreading load across providers is privacy + reliability
+// hygiene — no single upstream sees the full query stream from one client.
+export const UPSTREAM_DOH_URLS = [
+  'https://cloudflare-dns.com/dns-query',
+  'https://dns.google/dns-query',
+  'https://dns.quad9.net/dns-query',
+];
+
+// env.SINK_DOH_URLS is a JSON-encoded URL array. Anything malformed throws
+// → caught by the outer fetch handler → SERVFAIL with the error logged.
+export function parseSinkUrls(env) {
+  return JSON.parse(env.SINK_DOH_URLS);
+}
+
 const RCODE_SERVFAIL = 2;
-const RCODE_NXDOMAIN = 3;
 
 export async function readDnsRequest(request, url) {
   if (request.method === 'GET') {
@@ -34,66 +46,26 @@ function decodeBase64Url(value) {
   }
 }
 
-function syntheticSoa(name, ttl) {
-  return {
-    name,
-    type: 'SOA',
-    ttl,
-    data: {
-      // mname/rname are synthetic — we are not a real authoritative server,
-      // but the record must parse. Clients only read `minimum` for neg-cache.
-      mname: name,
-      rname: `hostmaster.${name}`,
-      serial: 1,
-      refresh: ttl,
-      retry: ttl,
-      expire: ttl,
-      minimum: ttl,
-    },
-  };
-}
-
-function echoOpt(query) {
+export function servfailResponse(query, question) {
+  // Echo client's OPT (EDNS) record with the DNSSEC OK bit cleared — synth
+  // answers are unsigned, so a validating client must not be told this
+  // response carries DNSSEC data.
   const opt = query.additionals?.find((r) => r.type === 'OPT');
-  if (!opt) return [];
-  // Clear DO bit: synth answers are unsigned, so a validating client must not
-  // be told this response carries DNSSEC data.
-  return [{ ...opt, flags: (opt.flags ?? 0) & ~dnsPacket.DNSSEC_OK, options: opt.options ?? [] }];
-}
-
-function encode(query, question, rcode, answers, authorities = []) {
-  const flags =
-    // Mirror a real recursive resolver: keep client RD, set RA, layer in rcode;
-    // otherwise clients reject the synthetic response.
-    dnsPacket.RECURSION_AVAILABLE | ((query.flags ?? 0) & dnsPacket.RECURSION_DESIRED) | rcode;
+  const additionals = opt
+    ? [{ ...opt, flags: (opt.flags ?? 0) & ~dnsPacket.DNSSEC_OK, options: opt.options ?? [] }]
+    : [];
+  // Mirror a real recursive resolver: set RA, echo client RD per RFC 1035
+  // §4.1.1, OR in SERVFAIL in the low nibble — otherwise stub resolvers
+  // reject the response.
+  const flags = dnsPacket.RECURSION_AVAILABLE | ((query.flags ?? 0) & dnsPacket.RECURSION_DESIRED) | RCODE_SERVFAIL;
   return dnsPacket.encode({
     type: 'response',
     id: query.id ?? 0,
     flags,
     questions: [question],
-    answers,
-    additionals: echoOpt(query),
-    authorities,
+    answers: [],
+    additionals,
   });
-}
-
-export function blockedResponse(query, question, ttl = BLOCK_TTL_SECONDS) {
-  const answers = [];
-  // A/AAAA get null-route synthesis; other types get empty NOERROR so the
-  // client sees "no such record" rather than a fake IP.
-  if (question.type === 'A') answers.push({ ...question, ttl, data: '0.0.0.0' });
-  else if (question.type === 'AAAA') answers.push({ ...question, ttl, data: '::' });
-  // RFC 2308: empty NOERROR (NODATA) needs an SOA in the authority section so
-  // the client knows how long to negative-cache. Without it, RFC-strict clients
-  // re-query on every lookup — common for HTTPS/SVCB (type 65), which Apple and
-  // Chrome fire alongside every A/AAAA. A/AAAA blocks already carry a TTL on
-  // the synth answer, so they don't need this.
-  const authorities = answers.length === 0 ? [syntheticSoa(question.name, ttl)] : [];
-  return encode(query, question, RCODE_NOERROR, answers, authorities);
-}
-
-export function servfailResponse(query, question) {
-  return encode(query, question, RCODE_SERVFAIL, []);
 }
 
 export function dnsResponse(body, status = 200) {
@@ -103,7 +75,34 @@ export function dnsResponse(body, status = 200) {
   });
 }
 
-export function dnsRequest(body, url = UPSTREAM_DOH_URL) {
+// Type-agnostic recursive walk: yield every string anywhere in `value`. Lets
+// us scan rdata without per-record-type knowledge. normalizeDomain filters
+// out anything that isn't a syntactically valid domain (TXT junk, base64
+// blobs, IP literals, SPF strings with spaces all fail the regex).
+function* allStrings(value) {
+  if (typeof value === 'string') yield value;
+  else if (Array.isArray(value)) for (const v of value) yield* allStrings(v);
+  else if (value && typeof value === 'object') for (const v of Object.values(value)) yield* allStrings(v);
+}
+
+// Scan only the answers section. Authorities/additionals carry NS hostnames
+// and glue records — false-positive risk if any NS hostname matches the
+// bloom, and tracker domains live in answers anyway.
+export function scanAnswersForBlocked(reply, filter) {
+  for (const record of reply?.answers ?? []) {
+    for (const s of allStrings(record)) {
+      const d = normalizeDomain(s);
+      if (d && isBlockedDomain(d, filter)) return true;
+    }
+  }
+  return false;
+}
+
+export function pickRandom(items) {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+export function dnsRequest(body, url = pickRandom(UPSTREAM_DOH_URLS)) {
   return new Request(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/dns-message' },
