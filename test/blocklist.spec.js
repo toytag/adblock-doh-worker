@@ -4,6 +4,7 @@ import { BloomFilter } from 'bloom-filters';
 import {
   BLOOM_KEY,
   __test_resetFilterCache,
+  hasBlockedDomains,
   isBlockedDomain,
   loadBloomFilter,
   normalizeDomain,
@@ -71,11 +72,12 @@ describe('loadBloomFilter', () => {
     expect(err).toHaveBeenCalledWith('bloom load failed', { reason: 'missing' });
   });
 
-  it('returns null on invalid JSON shape and logs reason', async () => {
+  it('returns null when Bloom JSON rehydrates to an invalid filter shape', async () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const kv = new KvStub({ [BLOOM_KEY]: { not: 'a bloom filter' } });
+    vi.spyOn(BloomFilter, 'fromJSON').mockReturnValue({});
+    const kv = new KvStub({ [BLOOM_KEY]: { filter: 'invalid' } });
     expect(await loadBloomFilter(kv)).toBeNull();
-    expect(err).toHaveBeenCalledWith('bloom load failed', expect.objectContaining({ reason: 'load_error' }));
+    expect(err).toHaveBeenCalledWith('bloom load failed', { reason: 'invalid_shape' });
   });
 
   it('returns null when KV throws and logs reason with message', async () => {
@@ -127,6 +129,85 @@ describe('loadBloomFilter', () => {
     expect(await loadBloomFilter(kv)).toBeNull();
     expect(await loadBloomFilter(kv)).toBeNull();
     expect(calls).toBe(2);
+  });
+});
+
+describe('hasBlockedDomains', () => {
+  it('returns true when the value itself is a blocked domain', () => {
+    expect(hasBlockedDomains('tracker.example', stubFilter(['tracker.example']))).toBe(true);
+  });
+
+  it('returns true when any nested string is blocked', () => {
+    const value = {
+      service: {
+        metadata: ['clean.example', { target: 'tracker.example' }],
+      },
+    };
+
+    expect(hasBlockedDomains(value, stubFilter(['tracker.example']))).toBe(true);
+  });
+
+  it('returns true when a decoded DNS-like object contains a blocked domain', () => {
+    const value = {
+      answers: [
+        {
+          name: 'clean.example',
+          type: 'HTTPS',
+          class: 'IN',
+          ttl: 60,
+          data: { priority: 1, target: 'tracker.example', values: [] },
+        },
+      ],
+    };
+
+    expect(hasBlockedDomains(value, stubFilter(['tracker.example']))).toBe(true);
+  });
+
+  it('returns true when the record name itself is blocked by a parent-label match', () => {
+    const reply = {
+      answers: [{ name: 'sub.tracker.example', type: 'A', class: 'IN', ttl: 60, data: '1.2.3.4' }],
+    };
+    expect(hasBlockedDomains(reply, stubFilter(['tracker.example']))).toBe(true);
+  });
+
+  it('returns false for all-clean nested values', () => {
+    const value = {
+      hostnames: ['clean.example', { target: 'cdn.example' }],
+      addresses: ['1.2.3.4', '::1'],
+    };
+
+    expect(hasBlockedDomains(value, stubFilter(['tracker.example']))).toBe(false);
+  });
+
+  it('returns false for empty and non-string containers without throwing', () => {
+    const filter = stubFilter(['tracker.example']);
+    const values = [
+      { items: [] },
+      {},
+      { count: 1, enabled: true, nested: null },
+      { foo: { bar: 42, baz: null, list: [{ ok: false }] } },
+    ];
+
+    for (const value of values) {
+      expect(() => hasBlockedDomains(value, filter)).not.toThrow();
+      expect(hasBlockedDomains(value, filter)).toBe(false);
+    }
+  });
+
+  it('ignores TXT junk that is not a valid domain', () => {
+    const value = {
+      text: ['v=spf1 include:_spf.example -all'],
+    };
+    expect(hasBlockedDomains(value, stubFilter(['tracker.example']))).toBe(false);
+  });
+
+  it('does not special-case DNS sections', () => {
+    const value = {
+      answers: [{ name: 'clean.example', type: 'A', class: 'IN', ttl: 60, data: '1.2.3.4' }],
+      authorities: [{ name: 'tracker.example', type: 'NS', class: 'IN', ttl: 60, data: 'tracker.example' }],
+      additionals: [{ name: 'tracker.example', type: 'A', class: 'IN', ttl: 60, data: '5.6.7.8' }],
+    };
+    expect(hasBlockedDomains(value, stubFilter(['tracker.example']))).toBe(true);
   });
 });
 

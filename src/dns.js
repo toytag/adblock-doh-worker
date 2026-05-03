@@ -1,12 +1,22 @@
 import { Buffer } from 'node:buffer';
 import * as dnsPacket from 'dns-packet';
 
-export const UPSTREAM_DOH_URL = 'https://cloudflare-dns.com/dns-query';
-const BLOCK_TTL_SECONDS = 300;
+// Pool of recursive DoH endpoints; one is picked at random per request so no
+// single upstream sees the full query stream from one client.
+export const UPSTREAM_DOH_URLS = [
+  'https://cloudflare-dns.com/dns-query',
+  'https://dns.google/dns-query',
+  'https://dns.quad9.net/dns-query',
+];
+
+// Short so blocklist edits propagate to clients within a minute without
+// hammering us — synthesized answers have no real TTL to honor.
+export const BLOCK_TTL_SECONDS = 60;
 
 const RCODE_NOERROR = 0;
 const RCODE_SERVFAIL = 2;
-const RCODE_NXDOMAIN = 3;
+
+// --- Inbound: parse client DoH request ---------------------------------------
 
 export async function readDnsRequest(request, url) {
   if (request.method === 'GET') {
@@ -24,6 +34,9 @@ export async function readDnsRequest(request, url) {
   return { ok: true, body: new Uint8Array(await request.arrayBuffer()) };
 }
 
+// `Buffer.from(_, 'base64url')` silently drops invalid chars instead of
+// throwing, so pre-validate to reject malformed input as 400 rather than
+// forwarding garbage upstream.
 function decodeBase64Url(value) {
   if (!/^[A-Za-z0-9_-]+=*$/.test(value)) return null;
   try {
@@ -34,7 +47,24 @@ function decodeBase64Url(value) {
   }
 }
 
-function syntheticSoa(name, ttl) {
+// --- Outbound: forward to upstream resolver ----------------------------------
+
+export function pickRandom(items) {
+  if (items.length === 0) throw new Error('cannot pick from an empty pool');
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+export function dnsRequest(body, upstreamUrl) {
+  return new Request(upstreamUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/dns-message' },
+    body,
+  });
+}
+
+// --- Synthesis: build DNS response wire bytes --------------------------------
+
+function negativeCachingSoa(name, ttl) {
   return {
     name,
     type: 'SOA',
@@ -42,37 +72,27 @@ function syntheticSoa(name, ttl) {
     data: {
       // mname/rname are synthetic — we are not a real authoritative server,
       // but the record must parse. Clients only read `minimum` for neg-cache.
-      mname: name,
-      rname: `hostmaster.${name}`,
+      mname: 'fake-for-negative-caching.invalid',
+      rname: `hostmaster.${name && name !== '.' ? name : 'invalid'}`,
       serial: 1,
-      refresh: ttl,
-      retry: ttl,
-      expire: ttl,
+      refresh: 1800,
+      retry: 900,
+      expire: 604800,
       minimum: ttl,
     },
   };
 }
 
-function echoOpt(query) {
-  const opt = query.additionals?.find((r) => r.type === 'OPT');
-  if (!opt) return [];
-  // Clear DO bit: synth answers are unsigned, so a validating client must not
-  // be told this response carries DNSSEC data.
-  return [{ ...opt, flags: (opt.flags ?? 0) & ~dnsPacket.DNSSEC_OK, options: opt.options ?? [] }];
-}
-
 function encode(query, question, rcode, answers, authorities = []) {
-  const flags =
-    // Mirror a real recursive resolver: keep client RD, set RA, layer in rcode;
-    // otherwise clients reject the synthetic response.
-    dnsPacket.RECURSION_AVAILABLE | ((query.flags ?? 0) & dnsPacket.RECURSION_DESIRED) | rcode;
   return dnsPacket.encode({
     type: 'response',
     id: query.id ?? 0,
-    flags,
+    // Mirror a real recursive resolver: keep client RD, set RA, layer in rcode;
+    // otherwise clients reject the synthetic response.
+    flags: dnsPacket.RECURSION_AVAILABLE | ((query.flags ?? 0) & dnsPacket.RECURSION_DESIRED) | rcode,
     questions: [question],
     answers,
-    additionals: echoOpt(query),
+    additionals: [],
     authorities,
   });
 }
@@ -88,7 +108,7 @@ export function blockedResponse(query, question, ttl = BLOCK_TTL_SECONDS) {
   // re-query on every lookup — common for HTTPS/SVCB (type 65), which Apple and
   // Chrome fire alongside every A/AAAA. A/AAAA blocks already carry a TTL on
   // the synth answer, so they don't need this.
-  const authorities = answers.length === 0 ? [syntheticSoa(question.name, ttl)] : [];
+  const authorities = answers.length === 0 ? [negativeCachingSoa(question.name, ttl)] : [];
   return encode(query, question, RCODE_NOERROR, answers, authorities);
 }
 
@@ -96,17 +116,11 @@ export function servfailResponse(query, question) {
   return encode(query, question, RCODE_SERVFAIL, []);
 }
 
+// --- Outbound: wrap wire bytes for the client --------------------------------
+
 export function dnsResponse(body, status = 200) {
   return new Response(body, {
     status,
     headers: { 'Content-Type': 'application/dns-message' },
-  });
-}
-
-export function dnsRequest(body, url = UPSTREAM_DOH_URL) {
-  return new Request(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/dns-message' },
-    body,
   });
 }

@@ -7,7 +7,7 @@ A Cloudflare Worker that serves a DNS-over-HTTPS endpoint with ad blocking backe
 - Handles DoH requests at `/dns-query` over GET and POST.
 - Loads a serialized Bloom filter from Workers KV key `blocklist:bloom`.
 - Blocks matching domains with synthetic DNS responses.
-- Forwards allowed queries to Cloudflare DNS at `https://cloudflare-dns.com/dns-query`.
+- Forwards queries to a recursive DoH upstream pool, then blocks replies whose answers match the Bloom filter.
 - Writes per-query outcome metrics to Workers Analytics Engine when the `ANALYTICS` binding is available.
 - Fails open if the Bloom filter is missing or cannot be loaded, so DNS keeps working.
 
