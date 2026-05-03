@@ -132,6 +132,20 @@ describe('forwarding', () => {
     expect((await decode(res)).flags & 0xf).toBe(2);
   });
 
+  it('returns SERVFAIL when upstream selection fails before fetch starts', async () => {
+    const saved = [...UPSTREAM_DOH_URLS];
+    UPSTREAM_DOH_URLS.length = 0;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const analytics = vi.spyOn(env.ANALYTICS, 'writeDataPoint');
+    try {
+      const res = await postQuery(OPEN);
+      expect((await decode(res)).flags & 0xf).toBe(2);
+      assertSingleDataPoint(analytics, 'servfail', 'A', 'unknown');
+    } finally {
+      UPSTREAM_DOH_URLS.push(...saved);
+    }
+  });
+
   it('returns SERVFAIL on unparseable upstream reply', async () => {
     vi.stubGlobal('fetch', async () => new Response(new Uint8Array([0xff, 0xff, 0xff, 0xff])));
     const res = await postQuery(OPEN);
@@ -169,7 +183,7 @@ describe('reply-side blocking', () => {
     const { __test_resetFilterCache, loadBloomFilter } = await import('../src/blocklist.js');
     __test_resetFilterCache();
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const analytics = vi.spyOn(env.ANALYTICS, 'writeDataPoint');
     const originalGet = env.KV.get.bind(env.KV);
     env.KV.get = async () => null;
     try {
@@ -177,6 +191,7 @@ describe('reply-side blocking', () => {
       expect(calls).toHaveLength(1);
       expect(UPSTREAM_DOH_URLS).toContain(calls[0]);
       expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array(upstreamBody));
+      assertSingleDataPoint(analytics, 'allowed', 'A');
     } finally {
       env.KV.get = originalGet;
       __test_resetFilterCache();
@@ -196,8 +211,7 @@ describe('analytics', () => {
 
     await postQuery(BLOCKED);
 
-    expect(spy).toHaveBeenCalledTimes(1);
-    assertDataPoint(spy.mock.calls[0][0], 'blocked', 'A');
+    assertSingleDataPoint(spy, 'blocked', 'A');
     spy.mockRestore();
   });
 
@@ -211,8 +225,7 @@ describe('analytics', () => {
 
     await postQuery(OPEN);
 
-    expect(spy).toHaveBeenCalledTimes(1);
-    assertDataPoint(spy.mock.calls[0][0], 'allowed', 'A');
+    assertSingleDataPoint(spy, 'allowed', 'A');
     spy.mockRestore();
   });
 
@@ -224,8 +237,7 @@ describe('analytics', () => {
 
     await postQuery(OPEN);
 
-    expect(spy).toHaveBeenCalledTimes(1);
-    assertDataPoint(spy.mock.calls[0][0], 'servfail', 'A');
+    assertSingleDataPoint(spy, 'servfail', 'A');
     spy.mockRestore();
   });
 });
@@ -285,11 +297,18 @@ async function decode(response) {
   return dnsPacket.decode(Buffer.from(await response.arrayBuffer()));
 }
 
-function assertDataPoint(point, outcome, qtype) {
-  expect(point.blobs).toHaveLength(3);
+function assertSingleDataPoint(spy, outcome, qtype, upstream = UPSTREAM_DOH_URLS) {
+  expect(spy).toHaveBeenCalledTimes(1);
+  assertDataPoint(spy.mock.calls[0][0], outcome, qtype, upstream);
+}
+
+function assertDataPoint(point, outcome, qtype, upstream) {
+  expect(point.blobs).toHaveLength(4);
   expect(point.blobs[0]).toBe(outcome);
   expect(point.blobs[1]).toBe(qtype);
   expect(typeof point.blobs[2]).toBe('string');
+  if (Array.isArray(upstream)) expect(upstream).toContain(point.blobs[3]);
+  else expect(point.blobs[3]).toBe(upstream);
   expect(point.doubles).toHaveLength(1);
   expect(point.doubles[0]).toBeGreaterThanOrEqual(0);
   expect(point.indexes).toBeUndefined();

@@ -7,6 +7,7 @@ import {
   dnsResponse,
   blockedResponse,
   dnsRequest,
+  pickRandom,
   readDnsRequest,
   servfailResponse,
   UPSTREAM_DOH_URLS,
@@ -253,7 +254,7 @@ describe('dnsResponse', () => {
 });
 
 describe('dnsRequest', () => {
-  it('builds an upstream DoH POST for an explicit resolver URL', async () => {
+  it('builds an upstream DoH POST for a selected resolver URL', async () => {
     const body = new Uint8Array([1, 2, 3]);
     const req = dnsRequest(body, 'https://resolver.test/dns-query');
 
@@ -262,21 +263,14 @@ describe('dnsRequest', () => {
     expect(req.headers.get('Content-Type')).toBe('application/dns-message');
     expect(new Uint8Array(await req.arrayBuffer())).toEqual(body);
   });
+});
 
-  it('defaults to one resolver from the upstream pool', () => {
-    const req = dnsRequest(new Uint8Array([0]));
-    expect(UPSTREAM_DOH_URLS).toContain(req.url);
-  });
-
-  it('picks one resolver when given an explicit pool', () => {
+describe('pickRandom', () => {
+  it('picks one item from an explicit pool', () => {
     const pool = ['https://a.test/dns-query', 'https://b.test/dns-query'];
-    const seen = new Set();
-    for (let i = 0; i < 200 && seen.size < pool.length; i++) {
-      const req = dnsRequest(new Uint8Array([0]), pool);
-      expect(pool).toContain(req.url);
-      seen.add(req.url);
-    }
-    expect(seen.size).toBe(pool.length);
+    vi.spyOn(Math, 'random').mockReturnValue(0.75);
+
+    expect(pickRandom(pool)).toBe('https://b.test/dns-query');
   });
 });
 

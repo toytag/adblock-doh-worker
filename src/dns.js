@@ -49,11 +49,13 @@ function decodeBase64Url(value) {
 
 // --- Outbound: forward to upstream resolver ----------------------------------
 
-// `upstream` accepts a single URL or a pool; pool inputs get one pick per call
-// so load-balancing happens at request time, not at module load.
-export function dnsRequest(body, upstream = UPSTREAM_DOH_URLS) {
-  const url = Array.isArray(upstream) ? upstream[Math.floor(Math.random() * upstream.length)] : upstream;
-  return new Request(url, {
+export function pickRandom(items) {
+  if (items.length === 0) throw new Error('cannot pick from an empty pool');
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+export function dnsRequest(body, upstreamUrl) {
+  return new Request(upstreamUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/dns-message' },
     body,
