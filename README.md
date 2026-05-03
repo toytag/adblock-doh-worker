@@ -1,98 +1,107 @@
 # Adblock DoH Worker
 
-A Cloudflare Worker that serves a DNS-over-HTTPS endpoint with ad blocking backed by a Bloom filter stored in Workers KV.
+Cloudflare Worker DNS-over-HTTPS resolver with Bloom-filter ad blocking.
 
-## What It Does
+## Shape
 
-- Handles DoH requests at `/dns-query` over GET and POST.
-- Loads a serialized Bloom filter from Workers KV key `blocklist:bloom`.
-- Blocks matching domains with synthetic DNS responses.
-- Forwards queries to a recursive DoH upstream pool, then blocks replies whose answers match the Bloom filter.
-- Writes per-query outcome metrics to Workers Analytics Engine when the `ANALYTICS` binding is available.
-- Fails open if the Bloom filter is missing or cannot be loaded, so DNS keeps working.
+- Endpoint: `/dns-query` over `GET` and `POST`.
+- Blocklist: Bloom JSON in Workers KV key `blocklist:bloom`.
+- Upstream: random recursive DoH resolver from pool.
+- Block hit: synthetic DNS response.
+- Filter miss or filter load fail: forward DNS upstream.
+- Metrics: counts only. No queried domains. No client IPs.
 
 ## Requirements
 
-- Node.js 24 & npm
-- A Cloudflare account with Wrangler access
-- A Workers KV namespace bound as `KV`
-- A Workers Analytics Engine dataset bound as `ANALYTICS`
+- Node.js 24 + npm
+- Cloudflare account + Wrangler access
+- KV namespace bound as `KV`
+- Analytics Engine dataset bound as `ANALYTICS`
 
-## Setup
+## Commands
 
 ```sh
 npm ci
-```
-
-Review `wrangler.jsonc` before deploying:
-
-- `name`: Worker name
-- `main`: Worker entrypoint
-- `kv_namespaces`: KV namespace binding used for the Bloom filter
-- `analytics_engine_datasets`: analytics binding for query metrics
-
-## Local Development
-
-Build the Bloom filter:
-
-```sh
 npm run bloom:build
-```
-
-Publish it to local Wrangler state:
-
-```sh
 npm run bloom:publish:local
-```
-
-Run the Worker locally:
-
-```sh
 npm run dev
 ```
 
-The local Worker listens on Wrangler's dev server. Send DoH requests to `/dns-query`.
-
-## Tests And Formatting
+Check work:
 
 ```sh
 npm test
 npm run format:check
 ```
 
-Use `npm run format` to apply formatting to `scripts/`, `src/`, and `test/`.
+Deploy:
+
+```sh
+npm run bloom:publish:remote
+npm run deploy
+```
+
+## Config
+
+Check `wrangler.jsonc` before deploy:
+
+- `name`: Worker name
+- `main`: Worker entrypoint
+- `kv_namespaces`: Bloom filter KV binding
+- `analytics_engine_datasets`: query metrics binding
+- `preview_urls`: Preview URL toggle
 
 ## Bloom Filter
 
-The build script downloads the configured blocklists, normalizes domains, deduplicates them, and writes:
+Build output:
 
 ```text
 .cache/blocklist-bloom.json
 ```
 
-By default it uses the HaGeZi Pro and TIF wildcard domain only lists. To build from custom sources, pass one or more URLs:
+Default lists: HaGeZi Pro + TIF wildcard domain-only lists.
+
+Custom list:
 
 ```sh
 node scripts/build-bloom.js --url https://example.com/list.txt --output .cache/blocklist-bloom.json
 ```
 
-Or set `BLOCKLIST_URL` to a comma- or whitespace-separated URL list.
+Multiple lists: repeat `--url`, or set comma/whitespace-separated `BLOCKLIST_URL`.
 
-## Deployment
+## Analytics SQL
 
-Publish the Bloom filter to the remote KV namespace:
+Dataset: `adblock_doh_analytics`
 
-```sh
-npm run bloom:publish:remote
+Slot map:
+
+```text
+blob1   outcome: allowed | blocked | servfail
+blob2   qtype: A | AAAA | HTTPS | UNKNOWN_65 | ...
+blob3   colo
+blob4   upstream URL, or unknown
+double1 latency_ms
 ```
 
-Deploy the Worker:
+Average latency by upstream and outcome:
 
-```sh
-npm run deploy
+```sql
+SELECT
+  blob4 AS upstream,
+  blob1 AS outcome,
+  SUM(_sample_interval) AS query_count,
+  SUM(_sample_interval * double1) / SUM(_sample_interval) AS avg_latency_ms,
+  quantileExactWeighted(0.50)(double1, _sample_interval) AS p50_latency_ms,
+  quantileExactWeighted(0.95)(double1, _sample_interval) AS p95_latency_ms
+FROM adblock_doh_analytics
+WHERE timestamp >= NOW() - INTERVAL '1' DAY
+GROUP BY upstream, outcome
+ORDER BY upstream, outcome;
 ```
 
-The GitHub Actions workflow in `.github/workflows/build-bloom.yml` runs on a schedule and can also be triggered manually. It installs dependencies with Node 24, runs tests, builds the Bloom filter, and publishes it to remote KV.
+## Automation
+
+`.github/workflows/build-bloom.yml` runs on schedule and manual trigger. It installs Node 24, runs tests, builds Bloom JSON, and publishes it to remote KV.
 
 ## References
 
@@ -100,3 +109,4 @@ The GitHub Actions workflow in `.github/workflows/build-bloom.yml` runs on a sch
 - [Wrangler commands](https://developers.cloudflare.com/workers/wrangler/commands/)
 - [Workers KV bindings](https://developers.cloudflare.com/kv/concepts/kv-bindings/)
 - [Workers Analytics Engine](https://developers.cloudflare.com/analytics/analytics-engine/get-started/)
+- [Analytics Engine SQL API](https://developers.cloudflare.com/analytics/analytics-engine/sql-api/)
